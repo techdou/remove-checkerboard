@@ -396,6 +396,79 @@ def test_white_bg_feather_applied():
 
 # ---------- 兼容非 pytest 运行 ----------
 
+
+
+
+# ---------- corner 引擎(四角采样色彩键控) ----------
+
+def make_baked_checkerboard_rgb(w=120, h=120, T=20) -> np.ndarray:
+    """合成"棋盘格画进 RGB"的假透明图:灰白两色棋盘底 + 中心红色主体。"""
+    yy, xx = np.mgrid[0:h, 0:w]
+    checker = ((xx // T) + (yy // T)) % 2
+    base = np.where(checker == 0, 255, 242).astype(np.uint8)
+    rgb = np.dstack([base, base, base])
+    # 中心 40x40 红色主体(与两种底色都距离很远)
+    rgb[40:80, 40:80] = [220, 60, 80]
+    return rgb
+
+
+def make_solid_bg_rgb(w=120, h=120, bg=(255, 248, 245)) -> np.ndarray:
+    """纯色背景 + 中心深色主体。"""
+    rgb = np.zeros((h, w, 3), np.uint8)
+    rgb[:, :] = bg
+    rgb[40:80, 40:80] = [60, 90, 120]
+    return rgb
+
+
+def test_corner_checkerboard_subject_kept():
+    """棋盘格两色都被角点采到;主体保留、背景全透明。"""
+    rgb = make_baked_checkerboard_rgb()
+    rgba, info = rc.process_image(rgb, use_rembg=False, engine="corner")
+    assert info["mode"] == "corner_key"
+    assert len(info["samples"]) >= 2  # 灰白两色都采到
+    a = rgba[:, :, 3]
+    # clean_alpha 会清理边缘产生少量过渡像素,断言主体核心区
+    assert (a[45:75, 45:75] == 255).all(), "主体核心必须完全不透明"
+    assert (a[0:20, 0:20] == 0).all(), "棋盘格背景必须透明"
+
+
+def test_corner_solid_bg():
+    """纯色背景同样适用(采样色唯一)。"""
+    rgb = make_solid_bg_rgb()
+    rgba, info = rc.process_image(rgb, use_rembg=False, engine="corner")
+    assert len(info["samples"]) == 1
+    a = rgba[:, :, 3]
+    assert (a[45:75, 45:75] == 255).all()
+    assert (a[0:30, 0:30] == 0).all()
+
+
+def test_corner_light_subject_close_to_bg_warned_by_doc():
+    """主体色接近背景色时会被误吃——这是 corner 引擎的已知边界(文档化)。
+    本测试锁定该行为,防止未来误改为静默失败。"""
+    rgb = make_solid_bg_rgb(bg=(255, 255, 255))
+    rgb[40:80, 40:80] = [252, 252, 252]  # 主体与背景仅差 3
+    rgba, _ = rc.process_image(rgb, use_rembg=False, engine="corner")
+    a = rgba[:, :, 3]
+    # 距离 9 < tol*3=78 → 主体被当背景清除(边界行为,非 bug)
+    assert (a[40:80, 40:80] == 0).all()
+
+
+def test_corner_two_color_samples_distinct():
+    """采样去重:棋盘格恰好两个底色,不因多点采样膨胀。"""
+    rgb = make_baked_checkerboard_rgb()
+    colors = rc.corner_sample_colors(rgb)
+    assert len(colors) == 2
+
+
+def test_corner_feather_applies():
+    """feather 在 corner 引擎下同样生效(边缘出现中间 alpha)。"""
+    rgb = make_solid_bg_rgb()
+    rgba, _ = rc.process_image(rgb, use_rembg=False, engine="corner", feather=4)
+    a = rgba[:, :, 3]
+    band = a[38:42, 60]  # 主体上边缘附近应有 0<alpha<255 的过渡
+    assert ((band > 0) & (band < 255)).any(), "feather 后边缘应有过渡带"
+
+
 if __name__ == "__main__":
     import traceback
     tests = [v for k, v in sorted(globals().items())

@@ -10,7 +10,15 @@ This means engine choice mainly affects **edge quality on the subject boundary**
 
 Tested on 8 AI-generated images (art text, info cards, banners, vertical strips) with checkerboard backgrounds baked into pixels.
 
-### BiRefNet (default, recommended)
+### rembg (default)
+
+- **Model**: U²-Net via rembg
+- **Strengths**: CPU-friendly, no GPU needed. Good subject boundary on photos and illustrations. Handles light-colored subjects near the bg color better than color keying, because it segments the subject semantically.
+- **Weaknesses**: Edges slightly less clean on flat geometric shapes compared to BiRefNet.
+- **Download**: ~176MB, first-run only, cached to `~/.u2net/`.
+- **Speed**: ~0.3s/image on CPU.
+
+### BiRefNet (best quality, GPU)
 
 - **Model**: ZhengPeng7/BiRefNet_dynamic (2025.3, SOTA dichotomous image segmentation)
 - **Architecture**: Bilateral Reference framework, trained on dynamic resolutions 256×256 to 2304×2304
@@ -39,6 +47,13 @@ The key insight: **pure color/texture methods fail on light-colored subjects**. 
 This is why every public solution (Stack Overflow answers, existing scripts) has the same acknowledged limitation: "large white areas in the foreground may not work."
 
 The neural network engine solves this by *semantically* recognizing "this is a card/object" vs "this is a background pattern". The residual method then handles the actual checkerboard removal. Together they cover each other's blind spots.
+
+### corner (fast path for uniform AI asset packs)
+
+- **How**: samples four corners + top-center, keys out pixels close to those colors (Manhattan distance, tol 26/channel). No model, no download.
+- **Strengths**: ~0.1s/image; excellent on asset packs where the subject colors differ from the fake-transparent background (character sprites, envelopes, cards, frames). Skips images that already have real alpha.
+- **Weaknesses**: no subject understanding — light subjects close to the bg color get partially eaten; semi-transparent subjects (glass) and full-bleed scenes trip the safety guard (more than 2 sampled colors) and auto-fall back to the checkerboard/solid-bg pipeline.
+- **When**: batch-processing AI asset packs; try it first, check `mode` in output — `corner_key` means clean keying, anything else means fallback happened and you may want `rembg` for that image.
 
 ## GPU vs CPU
 

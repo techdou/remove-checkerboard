@@ -17,22 +17,27 @@ The script **auto-detects** which type — you don't choose.
 ### Quick start
 
 ```bash
-# Default: BiRefNet engine + feather 4 (best quality, needs GPU)
-python scripts/remove_checkerboard.py input.png -o ./output --engine birefnet --feather 4
+# Default engine (rembg) - CPU works out of the box
+python scripts/remove_checkerboard.py input.png -o ./output --feather 4
 
 # Batch a folder (mixed checkerboard + white-bg images is fine)
-python scripts/remove_checkerboard.py ./images -o ./output --engine birefnet --feather 4
+python scripts/remove_checkerboard.py ./images -o ./output --feather 4
 
-# CPU-only (rembg, no GPU needed)
-python scripts/remove_checkerboard.py input.png --engine rembg --feather 4
+# AI asset pack batch (zero-model, instant; auto-falls back if unsuitable)
+python scripts/remove_checkerboard.py ./sprites -o ./out --engine corner --feather 4
+
+# Best edges, needs NVIDIA GPU
+python scripts/remove_checkerboard.py input.png -o ./output --engine birefnet --feather 4
 ```
 
 ### Engines
 
-| Engine | Quality | GPU | Speed |
-|---|---|---|---|
-| `birefnet` (default) | Best | Required | Slower |
-| `rembg` | Good | Not required | Faster |
+| Engine | Quality | GPU | Speed | When |
+|---|---|---|---|---|
+| `rembg` (default) | Good | Not required | ~0.3s/img | General use; light subjects near bg color |
+| `birefnet` | Best | Required | ~0.5s/img | Best edges when GPU available |
+| `corner` | Subject-dependent | Not required | ~0.1s/img | Batch AI asset packs, uniform fake-transparent bg |
+| `none` | Basic | Not required | ~0.1s/img | Offline preview, no models |
 
 ### When to trigger
 

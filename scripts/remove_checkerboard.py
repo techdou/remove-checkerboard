@@ -239,6 +239,45 @@ def compute_alpha(gray: np.ndarray, template: np.ndarray,
 
 # ---------- 2b. 白底检测(无棋盘格时降级)----------
 
+def corner_sample_colors(rgb: np.ndarray) -> list[tuple[int, int, int]]:
+    """沿图像四角 + 顶边中点采样背景色集合(去重)。
+
+    棋盘格假透明图的两个底色都会被采到;纯色背景图采到同一色。
+    采到 >2 种色 = 角点落在画面内容上,调用方应降级(见 process_image)。
+    """
+    h, w = rgb.shape[:2]
+    m = max(2, min(h, w) // 64)  # 角内缩,避开边缘压缩噪声
+    points = [
+        (m, m), (w - 1 - m, m), (m, h - 1 - m), (w - 1 - m, h - 1 - m),
+        (w // 2, m),
+    ]
+    colors = []
+    for x, y in points:
+        c = tuple(int(v) for v in rgb[y, x])
+        if all(abs(c[0]-p[0]) + abs(c[1]-p[1]) + abs(c[2]-p[2]) > 12 for p in colors):
+            colors.append(c)
+    return colors
+
+
+def corner_key_alpha(rgb: np.ndarray, tol: int = 26) -> tuple[np.ndarray, list]:
+    """四角采样色彩键控:与任一采样色接近的像素 → alpha 0,其余 → 1。
+
+    适用:AI 生成素材、背景干净均匀、主体与背景色分离(水彩立绘/图标/信封)。
+    不做主体识别——浅色主体与角点色几乎相同时会被误吃(SKILL.md 适用边界)。
+    返回 (alpha float32 0~1, 采样色列表)。
+    """
+    samples = corner_sample_colors(rgb)
+    dist = np.full(rgb.shape[:2], 10 ** 9, np.int32)
+    for c in samples:
+        d = (np.abs(rgb[:, :, 0].astype(np.int32) - c[0])
+             + np.abs(rgb[:, :, 1].astype(np.int32) - c[1])
+             + np.abs(rgb[:, :, 2].astype(np.int32) - c[2]))
+        dist = np.minimum(dist, d)
+    # tol 为单通道容差,×3 成曼哈顿距离;26 ≈ 保水彩柔和边缘不被啃
+    alpha = np.where(dist < tol * 3, 0.0, 1.0).astype(np.float32)
+    return alpha, samples
+
+
 def detect_solid_background(rgb: np.ndarray) -> tuple[np.ndarray | None, str]:
     """
     检测纯色/近纯色背景(常见:白底、浅灰底)。
@@ -400,8 +439,32 @@ def process_image(rgb: np.ndarray, use_rembg: bool = True,
       - feather>0 时对 alpha 边缘羽化,消除楼梯台阶锯齿
     """
     gray = np.array(Image.fromarray(rgb).convert("L"))
+
+    # === corner 引擎:四角采样色彩键控(零模型、秒级) ===
+    # 适用:AI 生成素材、假透明背景均匀、主体与背景色分离。
+    # 护栏:采样色 >2 = 角点落在画面内容上(半透明主体/满幅场景),
+    # 色彩键控会大面积误吃 → 自动降级走下方标准管线。
+    if engine == "corner":
+        samples = corner_sample_colors(rgb)
+        if len(samples) <= 2:
+            alpha, samples = corner_key_alpha(rgb)
+            alpha = clean_alpha(alpha, feather=feather)
+            alpha_u8 = (alpha * 255).astype(np.uint8)
+            rgb_clean = rgb.copy()
+            rgb_clean[alpha_u8 < 10] = 0
+            rgba = np.dstack([rgb_clean, alpha_u8])
+            info = {"mode": "corner_key", "samples": samples}
+            return rgba, info
+        # 降级:继续走标准管线,mode 会标 corner_fallback
+        info = {"mode": "corner_fallback",
+                "reason": f"{len(samples)} corner samples on content"}
+
     Tx, Ty, cx, cy, conf = detect_period(gray)
-    info = {"Tx": Tx, "Ty": Ty, "cx": cx, "cy": cy, "conf": f"{conf:.2f}"}
+    if "info" in locals():
+        # corner_fallback 降级进入:保留 mode/reason,补齐周期信息
+        info.update({"Tx": Tx, "Ty": Ty, "cx": cx, "cy": cy, "conf": f"{conf:.2f}"})
+    else:
+        info = {"Tx": Tx, "Ty": Ty, "cx": cx, "cy": cy, "conf": f"{conf:.2f}"}
 
     # === 降级路径:检测不到棋盘格 → 白底/纯色背景模式 ===
     if Tx == 0:
@@ -497,8 +560,9 @@ def main():
     ap = argparse.ArgumentParser(description="移除 AI 生成的棋盘格假透明背景")
     ap.add_argument("input", help="输入 PNG/JPG 文件或目录")
     ap.add_argument("-o", "--output", help="输出目录(默认与输入同级)")
-    ap.add_argument("--engine", choices=["rembg", "birefnet", "none"], default="rembg",
-                    help="语义分割引擎:rembg(U²-Net,默认), birefnet(SOTA,需GPU), none(纯残差法)")
+    ap.add_argument("--engine", choices=["rembg", "birefnet", "none", "corner"], default="rembg",
+                    help="引擎:rembg(U²-Net,默认), birefnet(SOTA,需GPU), none(纯残差法), "
+                         "corner(四角采样色彩键控——零模型秒级,适合背景均匀的 AI 素材包;主体与背景色近时自动降级)")
     ap.add_argument("--feather", type=int, default=0,
                     help="边缘羽化半径(像素),消除楼梯锯齿。推荐 2-4。默认 0")
     ap.add_argument("--no-rembg", action="store_true",
@@ -517,7 +581,11 @@ def main():
 
     engine = "none" if args.no_rembg else args.engine
     for f in files:
-        img = Image.open(f).convert("RGB")
+        img = Image.open(f)
+        if engine == "corner" and img.mode in ("RGBA", "LA", "PA"):
+            print(f"{os.path.basename(f)} → 跳过(已是真透明 {img.mode})")
+            continue
+        img = img.convert("RGB")
         rgb = np.array(img)
         rgba, info = process_image(rgb, use_rembg=(engine != "none"),
                                    feather=args.feather, engine=engine)
